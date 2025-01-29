@@ -104,6 +104,8 @@ def save_segmentation_nifti_from_softmax(segmentation_softmax: Union[str, np.nda
             do_separate_z = False
 
         if verbose: print("separate z:", do_separate_z, "lowres axis", lowres_axis)
+        # segmentation_softmax = segmentation_softmax.astype(np.float32)
+
         seg_old_spacing = resample_data_or_seg(segmentation_softmax, shape_original_after_cropping, is_seg=False,
                                                axis=lowres_axis, order=order, do_separate_z=do_separate_z,
                                                order_z=interpolation_order_z)

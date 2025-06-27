@@ -106,6 +106,7 @@ def process_prediction(trainer, list_of_lists: List[List[str]], output_files: Li
 @router.post("/predict/")
 async def create_prediction(file: UploadFile):
     """Predict segmentation from the uploaded NIFTI file."""
+    ModelDir = ModelDirT1
 
 
     filename = file.filename
@@ -196,6 +197,138 @@ async def create_prediction(file: UploadFile):
         pass
         # Clean up the temporary file
         # clean_up_temp_file(fd, niftyPath)
+
+
+
+
+
+
+
+
+
+@router.post("/predictT2/")
+async def create_prediction(file: UploadFile):
+    """Predict segmentation from the uploaded NIFTI file."""
+    ModelDir = ModelDirT2
+
+
+    filename = file.filename
+    print("file name:-",filename)
+
+    # Construct the full path where the file will be saved
+    save_path = os.path.join(input_folder, filename)
+    try:
+        # Save the uploaded file with the same name as it was inputted
+        with open(save_path, 'wb') as tmp:
+            data = await file.read()
+            tmp.write(data)
+
+        # Prepare directories and model
+        shutil.copy(join(ModelDir, 'plans.pkl'), output_folder)
+        expected_num_modalities = load_pickle(join(ModelDir, "plans.pkl"))['num_modalities']
+        case_ids = check_input_folder_and_return_caseIDs(input_folder, expected_num_modalities)
+        
+        # Prepare output files
+        list_of_lists, cleaned_output_files = prepare_output_files(input_folder, case_ids, output_folder)
+        
+        # Clear CUDA cache
+        print("Emptying CUDA cache")
+        torch.cuda.empty_cache()
+
+        # Load model
+        trainer, params = load_model_and_checkpoint_files(ModelDir, folds, mixed_precision=mixed_precision, checkpoint_name=checkpoint_name)
+
+        # Set export parameters
+        force_separate_z, interpolation_order, interpolation_order_z = set_segmentation_export_params(trainer)
+        
+        # Process the prediction
+        d, dct = process_prediction(trainer, list_of_lists, cleaned_output_files, params)
+
+        print("Predicting", cleaned_output_files[0])
+        trainer.load_checkpoint_ram(params[0], False)
+
+        softmax = trainer.predict_preprocessed_data_return_seg_and_softmax(
+            d, do_mirroring=do_tta, mirror_axes=trainer.data_aug_params['mirror_axes'], use_sliding_window=True,
+            step_size=step_size, use_gaussian=True, all_in_gpu=all_in_gpu,
+            mixed_precision=mixed_precision)[1]
+        
+        for p in params[1:]:
+            trainer.load_checkpoint_ram(p, False)
+            softmax += trainer.predict_preprocessed_data_return_seg_and_softmax(
+                d, do_mirroring=do_tta, mirror_axes=trainer.data_aug_params['mirror_axes'], use_sliding_window=True,
+                step_size=step_size, use_gaussian=True, all_in_gpu=all_in_gpu,
+                mixed_precision=mixed_precision)[1]
+        
+        if len(params) > 1:
+            softmax /= len(params)
+        
+        transpose_forward = trainer.plans.get('transpose_forward')
+        if transpose_forward is not None:
+            transpose_backward = trainer.plans.get('transpose_backward')
+            softmax = softmax.transpose([0] + [i + 1 for i in transpose_backward])
+        
+        if hasattr(trainer, 'regions_class_order'):
+            region_class_order = trainer.regions_class_order
+        else:
+            region_class_order = None
+        
+        np.save(cleaned_output_files[0][:-7] + ".npy", softmax)
+        save_segmentation_nifti_from_softmax(softmax, cleaned_output_files[0], dct, interpolation_order, region_class_order,
+                                    None, None,
+                                    npz_file, None, force_separate_z, interpolation_order_z)
+        
+        if not disable_postprocessing:
+            # results = []
+            pp_file = join(ModelDir, "postprocessing.json")
+            if isfile(pp_file):
+                print("postprocessing...")
+                shutil.copy(pp_file, os.path.abspath(os.path.dirname(cleaned_output_files[0])))
+                # for_which_classes stores for which of the classes everything but the largest connected component needs to be
+                # removed
+                for_which_classes, min_valid_obj_size = load_postprocessing(pp_file)
+                largest_removed, kept_size = load_remove_save(cleaned_output_files[0], cleaned_output_files[0], for_which_classes , min_valid_obj_size)
+            else:
+                print("WARNING! Cannot run postprocessing because the postprocessing file is missing. Make sure to run "
+                    "consolidate_folds in the output folder of the model first!\nThe folder you need to run this in is "
+                    "%s" % ModelDir)
+        
+        return FileResponse(cleaned_output_files[0], media_type="application/gzip", filename=os.path.basename(cleaned_output_files[0]))
+
+        # return {"message": "success"}
+
+    finally:
+        pass
+        # Clean up the temporary file
+        # clean_up_temp_file(fd, niftyPath)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 def set_segmentation_export_params(trainer) -> Tuple[Union[int, None], int, int]:
     """Set segmentation export parameters based on the trainer's plans."""
